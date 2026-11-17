@@ -130,7 +130,7 @@ In `config.plist` under `NVRAM -> Add -> 7C436110-AB2A-4BBB-A880-FE41995C9F82`:
 
 ### 4. DeviceProperties (`PciRoot(0x0)/Pci(0x2,0x0)`)
 
-Dell BIOS firmware typically pre-allocates less than 96 MB for DVMT. Inject the following properties:
+Check your BIOS settings for DVMT Pre-Allocated or Video Memory. If it is lower than 96 MB (Dell BIOS firmware typically pre-allocates 32 MB or 64 MB), add the following properties under `DeviceProperties -> Add -> PciRoot(0x0)/Pci(0x2,0x0)` in your `config.plist`. If your BIOS already sets DVMT to 96 MB or higher, you can skip this step.
 
 ```xml
 <key>PciRoot(0x0)/Pci(0x2,0x0)</key>

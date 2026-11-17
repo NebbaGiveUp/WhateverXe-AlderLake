@@ -6,16 +6,16 @@ It has been tested on a **Dell Latitude 7430** with an **Intel Core i7-1270P** p
 
 ---
 
-## The Problem: Why Official WhateverXe Fails on Alder Lake-P Laptops
+## Why Official WhateverXe Failed on Alder Lake-P Laptops
 
 When running official WhateverXe releases (v0.8.0 through v0.8.2) on 12th-Gen Dell laptops such as the Latitude 7430 or Precision 5570, the system boots, but display acceleration fails completely:
 
-- macOS System Information reports: `VRAM (Total): 7 MB`, `Kernel Extension Info: No Kext Loaded`, and no Metal support.
+- macOS System Information reports: `IrisXe GRaphics VRAM (Total): 7 MB`, `Kernel Extension Info: No Kext Loaded`, and no Metal support.
 - The display remains stuck on unaccelerated software rendering with severe window lagging and tearing.
 - In IORegistry, `display0` remains attached to the firmware VESA fallback framebuffer `.Display_boot` (`IONDRVFramebuffer`).
 - `IntelAccelerator` fails to attach under `IGPU@2`.
 
-### Technical Root Causes
+### Root Causes
 
 1. **eDP Boot Port Mode 0 Hand-off:**  
    Dell laptop firmware hands off the internal embedded DisplayPort (eDP) in native port mode 0. Official WhateverXe checks the boot port against desktop and Tiger Lake expectations and drops or rejects the port in mode 0. Consequently, the native framebuffer driver (`AppleIntelFramebuffer@0`) cannot claim the internal panel.

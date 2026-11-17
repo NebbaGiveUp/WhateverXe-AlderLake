@@ -70,6 +70,31 @@ Verified on the following configuration:
 
 ---
 
+## What Works and Known Limitations
+
+### What Works
+
+- **Full Metal 2 Hardware Acceleration:** Powered by `AppleIntelTGLGraphicsMTLDriver`, providing native CoreAnimation desktop compositing, transparent menu bars, fluid dock animations, and responsive Launchpad navigation.
+- **Dynamic VRAM Management:** Accurately reports and allocates 1536 MB of dynamic video memory to system processes.
+- **Internal Display Timing & Backlight:** Native 1920x1080 60Hz panel timing with working backlight level adjustments via keyboard shortcuts and Control Center.
+- **Hardware-Accelerated Video Playback:**
+  - H.264 / AVC 8-bit decode and encode up to 4K resolution.
+  - HEVC / H.265 8-bit and 10-bit (Main and Main 10 profiles) hardware decode.
+  - Smooth local video playback in applications such as QuickTime Player, IINA, and VLC.
+  - Full video streaming support in Chromium-based browsers (Google Chrome, Brave, Microsoft Edge) and Mozilla Firefox.
+  - Web media playback in web applications such as Telegram Web.
+
+### Known Limitations
+
+- **Safari Video Playback (YouTube and Streaming Media):**  
+  Safari fails to play YouTube videos and equivalent web video streams, returning a playback error. This occurs because macOS Tahoe's WebKit media pipeline relies on updated FairPlay and AVFoundation decoder pathways that do not interface correctly with the unreleased Tiger Lake GVA driver stack.  
+  *Solution:* Use an alternative browser such as Google Chrome, Brave, Microsoft Edge, or Mozilla Firefox. Web video playback in these browsers operates normally with full hardware decoding.
+- **Display Idle Blanking (Blitter Ring Hang):**  
+  Allowing the internal panel to turn off or blank due to an idle timer triggers an Intel Gen12 hardware blitter ring hang, resulting in a GPU reset and system freeze.  
+  *Solution:* Disable display idle sleep via terminal (`sudo pmset -a displaysleep 0`). System sleep (closing the lid or selecting Sleep from the Apple menu) remains functional and does not suffer from this issue.
+
+---
+
 ## Installation and OpenCore Configuration
 
 To achieve full acceleration on your machine, both the patched kernel extension and the userspace graphics package must be deployed with the proper OpenCore settings.

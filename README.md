@@ -148,7 +148,7 @@ Check your BIOS settings for DVMT Pre-Allocated or Video Memory. If it is lower 
 </dict>
 ```
 ### Misc.
-   Set display color mode to "generic rgb" in Settings> Display for the bext experience
+   Set display color mode to "generic rgb" in Settings> Display for the bext experience, it fixes many rendering glitches as well if you are facing any.
    
 **Important note on connector properties:**  
 Do **not** inject `AAPL,ig-platform-id` or hardcoded connector overrides (`framebuffer-con0-busid`, `framebuffer-con0-enable`, `framebuffer-con0-flags`, `framebuffer-con0-type`). WhateverXe manages Gen12 connector tables dynamically via its Display13 engine. Hardcoding legacy WhateverGreen properties will break the native eDP handshake.

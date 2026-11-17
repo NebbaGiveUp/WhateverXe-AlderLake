@@ -2,7 +2,7 @@
 
 This repository is a specialized build of WhateverXe incorporating critical display pipeline and firmware hand-off patches for 12th-Generation Intel Iris Xe Graphics (`8086:46A6`, Alder Lake-P) on macOS Tahoe and macOS Sequoia.
 
-It has been verified on a **Dell Latitude 7430** equipped with an **Intel Core i7-1270P** processor running macOS Tahoe 26.7.3 (`25G342`), delivering full Metal 2 acceleration, 1536 MB dynamic VRAM, native backlight control, and hardware-accelerated WindowServer rendering.
+It has been tested on a **Dell Latitude 7430** equipped with an **Intel Core i7-1270P** processor running macOS Tahoe 26.7.3 (`25G342`), giving full Metal 2 acceleration, native backlight control, and hardware-accelerated WindowServer rendering.
 
 ---
 

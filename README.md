@@ -1,4 +1,4 @@
-# WhateverXe (Alder Lake-P / Dell eDP Patchset)
+# WhateverXe (Alder Lake-P / Dell eDP Patch)
 
 This repository is a rebuild of WhateverXe with critical display pipeline and firmware hand-off patches for 12th-Generation Intel Iris Xe Graphics (`8086:46A6`, Alder Lake-P) on macOS Tahoe and macOS Sequoia.
 
@@ -10,7 +10,7 @@ It has been tested on a **Dell Latitude 7430** with an **Intel Core i7-1270P** p
 
 When running official WhateverXe releases (v0.8.0 through v0.8.2) on 12th-Gen Dell laptops such as the Latitude 7430 or Precision 5570, the system boots, but display acceleration fails completely:
 
-- macOS System Information reports: `IrisXe GRaphics VRAM (Total): 7 MB`, `Kernel Extension Info: No Kext Loaded`, and no Metal support.
+- macOS System Information reports: `IrisXe Graphics VRAM (Total): 7 MB`, `Kernel Extension Info: No Kext Loaded`, and no Metal support.
 - The display remains stuck on unaccelerated software rendering with severe window lagging and tearing.
 - In IORegistry, `display0` remains attached to the firmware VESA fallback framebuffer `.Display_boot` (`IONDRVFramebuffer`).
 - `IntelAccelerator` fails to attach under `IGPU@2`.

@@ -100,7 +100,9 @@ To achieve full acceleration on your machine, both the patched kernel extension 
 
 ### 1. Required Kexts and Load Order
 
-Ensure the following kexts are placed in `EFI/OC/Kexts` and declared in `config.plist` under `Kernel -> Add` in this exact order:
+Dell Latitude 7430 users can directly use the preconfigured [Dell Latitude 7430 OpenCore EFI](https://github.com/NebbaGiveUp/Dell-Latitude-7430-Hackintosh-OC-EFI) repository, which already includes all tested fixes, kexts, and ACPI patches.
+
+For other laptops, ensure the following kexts are placed in `EFI/OC/Kexts` and declared in `config.plist` under `Kernel -> Add` in this exact order:
 
 1. `Lilu.kext` (v1.7.2 or newer)
 2. [`WhateverXe.kext`](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) (download prebuilt binary from [Releases](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) or compile from source)

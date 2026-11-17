@@ -1,8 +1,8 @@
 # WhateverXe (Alder Lake-P / Dell eDP Patchset)
 
-This repository is a specialized build of WhateverXe incorporating critical display pipeline and firmware hand-off patches for 12th-Generation Intel Iris Xe Graphics (`8086:46A6`, Alder Lake-P) on macOS Tahoe and macOS Sequoia.
+This repository is a rebuild of WhateverXe with critical display pipeline and firmware hand-off patches for 12th-Generation Intel Iris Xe Graphics (`8086:46A6`, Alder Lake-P) on macOS Tahoe and macOS Sequoia.
 
-It has been tested on a **Dell Latitude 7430** equipped with an **Intel Core i7-1270P** processor running macOS Tahoe 26.7.3 (`25G342`), giving full Metal 2 acceleration, native backlight control, and hardware-accelerated WindowServer rendering.
+It has been tested on a **Dell Latitude 7430** with an **Intel Core i7-1270P** processor running macOS Tahoe 26.7.3 (`25G342`), giving full Metal 2 acceleration, native backlight control, and hardware-accelerated WindowServer rendering.
 
 ---
 

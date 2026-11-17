@@ -103,7 +103,7 @@ To achieve full acceleration on your machine, both the patched kernel extension 
 Ensure the following kexts are placed in `EFI/OC/Kexts` and declared in `config.plist` under `Kernel -> Add` in this exact order:
 
 1. `Lilu.kext` (v1.7.2 or newer)
-2. `WhateverXe.kext` (compiled from this repository)
+2. [`WhateverXe.kext`](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) (download prebuilt binary from [Releases](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) or compile from source)
 3. `AppleIntelTGLCompat.kext` (bundled with WhateverXe-Graphics)
 4. `AMFIPass.kext` (**Must use the AMFIPass 1.4.1 Mod build**; official upstream AMFIPass will fail library validation for the userspace graphics drivers on macOS Tahoe)
 

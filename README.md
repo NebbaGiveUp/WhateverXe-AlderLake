@@ -96,13 +96,11 @@ Verified on the following configuration:
 
 ## Installation and OpenCore Configuration
 
-To achieve full acceleration on your machine, both the patched kernel extension and the userspace graphics package must be deployed with the proper OpenCore settings.
-
 ### 1. Required Kexts and Load Order
 
 Dell Latitude 7430 users can directly use the preconfigured [Dell Latitude 7430 OpenCore EFI](https://github.com/NebbaGiveUp/Dell-Latitude-7430-Hackintosh-OC-EFI) repository, which already includes all tested fixes, kexts, and ACPI patches.
 
-For other laptops, ensure the following kexts are placed in `EFI/OC/Kexts` and declared in `config.plist` under `Kernel -> Add` in this exact order:
+For other laptops, ensure the following kexts are placed in `EFI/OC/Kexts` and added in `config.plist` under `Kernel -> Add` (Just use OC snapshot if you're using propertree gui) in this exact order:
 
 1. `Lilu.kext` (v1.7.2 or newer)
 2. [`WhateverXe.kext`](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) (download prebuilt binary from [Releases](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) or compile from source)
@@ -161,7 +159,7 @@ Download and install **`WhateverXe-Graphics-0.4.4.pkg`** from the [WhateverXe-Gr
 
 ## Power Management Notes
 
-Thanks to the Display Engine master parking and interrupt synchronization commits integrated in this build, standard display sleep timeouts work reliably out of the box on the Dell Latitude 7430. You do not need to alter power management settings for daily use.
+Thanks to the WhateverXE community commits used in this build, standard display sleep timeouts work reliably out of the box on the Dell Latitude 7430. You do not need to alter power management settings for daily use.
 
 If you are adapting this build for another laptop model and encounter blitter ring hangs during screen blanking, you can disable display idle sleep in Terminal as a troubleshooting measure:
 

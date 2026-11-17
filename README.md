@@ -1,138 +1,195 @@
-# WhateverXe
+# WhateverXe (Alder Lake-P / Dell eDP Patchset)
 
-[日本語](README_ja.md)
+This repository is a specialized build of WhateverXe that incorporates critical display pipeline and firmware hand-off patches for 12th-Generation Intel Iris Xe Graphics (`8086:46A6`, Alder Lake-P) on macOS Tahoe and macOS Sequoia.
 
-WhateverXe is a Lilu plugin, derived from WhateverGreen, that adapts Apple graphics drivers for selected Intel Xe-LP integrated GPUs.
-Use the latest releases of [WhateverXe](https://github.com/b00t0x/WhateverXe/releases) and [WhateverXe Graphics](https://github.com/b00t0x/WhateverXe-Graphics/releases) together. See [CHANGELOG](CHANGELOG.md) for release notes.
+It has been verified on a **Dell Latitude 7430** equipped with an **Intel Core i7-1270P** processor running macOS Tahoe 26.7.3 (`25G342`), delivering full Metal 2 acceleration, 1536 MB dynamic VRAM, native backlight control, and hardware-accelerated WindowServer rendering.
 
-## Compatibility
+---
 
-| macOS | Required version |
-| --- | --- |
-| Big Sur | 11.7.11 |
-| Monterey | 12.7.6 |
-| Ventura | 13.7.8 |
-| Sonoma | 14.8.9 |
-| Sequoia | 15.8.x |
-| Tahoe | 26.7 or newer |
+## Attribution and Upstream Credits
 
-Sequoia and Tahoe accept compatible updates within their OS family. Future Apple changes may require an update to WEX or Graphics.
+This project is not a fork from scratch, nor does it seek to replace upstream WhateverXe. It exists solely to provide a maintained, fully functioning reference implementation for Alder Lake-P laptop users facing internal eDP display hand-off failures.
 
-### Tested on hardware
+All core architecture, driver shims, and Gen12 Xe-LP reverse engineering belong to the original authors:
 
-- Tiger Lake-U: 48- and 80-EU configurations.
-- Alder Lake-N: 16- and 24-EU configurations.
-- Twin Lake: 32-EU configurations.
-- Alder Lake-H: 96-EU configurations, including single-channel operation.
-- Alder Lake-S: UHD Graphics 770.
-- Raptor Lake-U: 48-EU configurations.
+- **b00t0x and the WhateverXe Project:** Original author and maintainer of [b00t0x/WhateverXe](https://github.com/b00t0x/WhateverXe) and [WhateverXe-Graphics](https://github.com/b00t0x/WhateverXe-Graphics). The entire concept of leveraging Apple's unreleased Tiger Lake 16.0.32 graphics driver on modern macOS is their work.
+- **Thatisjigen:** Authored the fundamental eDP hand-off, single-output CDCLK routing, and framebuffer aperture alignment patches (WhateverXe Issue/PR #38).
+- **renedis:** Maintained and ported the patchset to the WhateverXe 0.8.x tree, authored the display interrupt and Display Engine (DE) sleep/wake master parking logic, and validated it on Dell Precision hardware (WhateverXe Issue #90, `precision-5570-display-wake` branch).
+- **Acidanthera:** Authors of Lilu and MacKernelSDK.
 
-See [tested features and known issues](#tested-features-and-known-issues) for OS coverage and display configurations. PCI IDs are listed in [device selection](docs/device-selection.md).
+---
 
-### Expected to work, not yet tested on hardware
+## The Problem: Why Official WhateverXe Fails on Alder Lake-P Laptops
 
-- Other supported Tiger Lake-U/H35 configurations, including 96 EU, and Tiger Lake-H45.
-- Other supported Alder Lake-N / Twin Lake configurations.
-- Other supported Alder Lake-H/P/U and Raptor Lake-H/P/U configurations.
-- Other supported Alder Lake-S/HX and Raptor Lake-S/HX configurations.
-- Internal eDP on Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U is implemented but has not been tested on hardware.
+When running official WhateverXe releases (v0.8.0 through v0.8.2) on 12th-Gen Dell laptops such as the Latitude 7430 or Precision 5570, the system boots, but display acceleration fails completely:
 
-### Further implementation required
+- macOS System Information reports: `VRAM (Total): 7 MB`, `Kernel Extension Info: No Kext Loaded`, and no Metal support.
+- The display is stuck on unaccelerated software rendering with severe window lagging and tearing.
+- Looking at IORegistry, `display0` remains attached to the firmware VESA fallback framebuffer `.Display_boot` (`IONDRVFramebuffer`).
+- `IntelAccelerator` fails to attach under `IGPU@2`.
 
-- Rocket Lake-S: display control requires additional support.
+### Technical Root Causes
 
-### No support planned
+1. **eDP Boot Port Mode 0 Hand-off:**
+   Dell laptop firmware hands off the internal embedded DisplayPort (eDP) in native port mode 0. Official WhateverXe checks the boot port against desktop and Tiger Lake expectations and drops or rejects the port in mode 0. Consequently, the native framebuffer driver (`AppleIntelFramebuffer@0`) cannot claim the internal panel.
+2. **WindowServer Trapped on `.Display_boot`:**
+   In the macOS graphics subsystem, `IntelAccelerator` (`AppleIntelTGLGraphics`) will only bind and initialize hardware acceleration once WindowServer successfully attaches to an active Apple framebuffer pipe. Because the framebuffer was rejected, WindowServer stays on `.Display_boot`, and the 3D acceleration stack is never brought up.
+3. **Single-Output CDCLK Timing Path:**
+   When only a single display pipe (the internal eDP screen) is present without external monitors, the stock driver fails to compute the core display clock (CDCLK) properly, resulting in a black screen or dropped initialization.
+4. **Aperture Alignment Check:**
+   Stock WhateverXe rejects the framebuffer aperture mapping if the BIOS-reserved stolen memory does not end on a strict 4KB page boundary.
 
-- Xe-LPG, including Meteor Lake integrated graphics.
-- Xe2 and later graphics architectures.
+---
 
-## Installation
+## How This Implementation Works
 
-1. Add Lilu, `WhateverXe.kext` and [AMFIPass 1.4.1 Mod](https://github.com/b00t0x/WhateverXe-Graphics/blob/main/extras/AMFIPass-v1.4.1-Mod-RELEASE.zip) to OpenCore, with WEX after Lilu. Use the WEX **RELEASE** ZIP; DEBUG is for troubleshooting.
-2. Set `csr-active-config=03080000` (`0x803`) and apply the [configuration](#configuration).
-3. Boot the target macOS, install the latest [WhateverXe Graphics pkg](https://github.com/b00t0x/WhateverXe-Graphics/releases), then restart. [Package installation and removal](https://github.com/b00t0x/WhateverXe-Graphics#install).
+This repository starts from the official **WhateverXe 0.8.2** release tag and integrates 10 community commits that address the Alder Lake-P display pipeline:
 
-Use the linked **Mod** AMFIPass instead of upstream AMFIPass; do not load both. WhateverGreen and WhateverXe must not be enabled together. `amfi=0x80` and `ipc_control_port_options=0` are unnecessary.
+1. **eDP Port Mode 0 Admission (`dca0ff6`):**
+   Explicitly admits the eDP boot port in native port mode 0 during firmware hand-off, allowing `AppleIntelFramebuffer@0` to claim the panel.
+2. **Single-Output CDCLK Routing (`490e06e`):**
+   Calculates and sets the 1305.6 MHz display clock path correctly when only the internal panel pipe has an active framebuffer.
+3. **Flexible Aperture Bounds (`8321cc9`):**
+   Accepts framebuffer memory apertures that do not terminate on a page boundary.
+4. **Display Sleep and Wake Interrupt Handling (`0859ce7` through `5ec4073`):**
+   - Keeps display interrupts active across single-output display wake transitions.
+   - Parks the display IRQ master off while the panel pipe is powered down.
+   - Maintains DE master cache coherency with underrun and interrupt storm guards.
+   - Prevents the native idle timer from re-arming a parked DE master prematurely.
+   - Re-arms the DE master once the display pipes resume post-wake.
+5. **GVA Video Decode Diagnostic Hooks (`46530e8`, `31e3bc8`):**
+   Adds opt-in boot arguments (`-wex-no-gva-scaler` and `-wex-no-gva`) to isolate hardware video decode pipelines if needed.
 
-Graphics installs under `/Library` and rebuilds AuxKC without patching System files or snapshots. Restore an old Xe System patch before installing. If you need OCLP for other root patches, use the [custom OCLP build](https://github.com/b00t0x/OpenCore-Legacy-Patcher) with the matching Mod signing chain.
+---
 
-## Configuration
+## Hardware Profile and Test Environment
 
-### Required boot arguments
+Verified on the following configuration:
 
-Add to OpenCore's `boot-args`:
+| Component | Specification |
+| :--- | :--- |
+| Model | Dell Latitude 7430 |
+| Processor | Intel Core i7-1270P (Alder Lake-P, 12 Cores / 16 Threads) |
+| Integrated Graphics | Intel Iris Xe Graphics (`8086:46A6`, Revision `0x0C`, Subsystem `1028:0B09`) |
+| Display Panel | 14.0-inch 1920x1080 60Hz internal eDP |
+| Operating System | macOS Tahoe 26.7.3 (`25G342`) |
+| SMBIOS | `MacBookPro16,2` |
+| VRAM | 1536 MB Dynamic |
+| Metal Support | Metal 2 (`AppleIntelTGLGraphicsMTLDriver`) |
+| Display Route | `IGPU@2` -> `AppleIntelFramebuffer@0` -> `display0` -> `AppleBacklightDisplay` |
 
-```text
--allow3d -disablegfxfirmware
+---
+
+## Installation and OpenCore Configuration
+
+To achieve full acceleration on your machine, both the patched kernel extension and the userspace graphics package must be deployed with the proper OpenCore settings.
+
+### 1. Required Kexts and Load Order
+
+Ensure the following kexts are placed in `EFI/OC/Kexts` and declared in `config.plist` under `Kernel -> Add` in this order:
+
+1. `Lilu.kext` (v1.7.2 or newer)
+2. `WhateverXe.kext` (compiled from this repository)
+3. `AppleIntelTGLCompat.kext` (bundled with WhateverXe-Graphics)
+4. `AMFIPass.kext` (**Must use the AMFIPass 1.4.1 Mod build**; official upstream AMFIPass will fail library validation for the userspace graphics drivers on macOS Tahoe)
+
+### 2. Kernel Quirks
+
+In `config.plist` under `Kernel -> Quirks`:
+- `DisableLinkeditJettison`: Set to `true` (preserves runtime symbol tables required for driver linking).
+
+### 3. NVRAM Configuration
+
+In `config.plist` under `NVRAM -> Add -> 7C436110-AB2A-4BBB-A880-FE41995C9F82`:
+
+- **`boot-args`:**
+  ```text
+  keepsyms=1 -allow3d -disablegfxfirmware -igfxdvmt
+  ```
+  *(Add your touchpad or platform flags like `-vi2c-force-polling` as needed, but do not add non-existent arguments like `-wex-dcoff` or `-wex-compat-fb`)*
+
+- **`csr-active-config`:**
+  ```text
+  03080000
+  ```
+  *(Equivalent to `0x803`, required to allow the modified graphics bundles to run)*
+
+### 4. DeviceProperties (`PciRoot(0x0)/Pci(0x2,0x0)`)
+
+Dell BIOS firmware typically pre-allocates less than 96 MB for DVMT. Inject the following properties:
+
+```xml
+<key>PciRoot(0x0)/Pci(0x2,0x0)</key>
+<dict>
+    <key>AAPL,slot-name</key>
+    <string>built-in</string>
+    <key>built-in</key>
+    <data>AA==</data>
+    <key>framebuffer-patch-enable</key>
+    <data>AQAAAA==</data>
+    <key>framebuffer-stolenmem</key>
+    <data>AAzAaw==</data>
+    <key>hda-gfx</key>
+    <string>onboard-1</string>
+</dict>
 ```
 
-### DVMT
+**Important note on connector properties:**
+Do **not** inject `AAPL,ig-platform-id` or hardcoded connector overrides (`framebuffer-con0-busid`, `framebuffer-con0-enable`, `framebuffer-con0-flags`, `framebuffer-con0-type`). WhateverXe manages Gen12 connector tables dynamically via its Display13 engine. Hardcoding legacy WhateverGreen properties will break the native eDP handshake.
 
-Set **DVMT Pre-Allocated to 96MB** in BIOS/UEFI where possible.
-If it is fixed at **60MB**, also add `-igfxdvmt` and set these iGPU properties under `DeviceProperties > Add` (usually `PciRoot(0x0)/Pci(0x2,0x0)`):
+### 5. Userspace Driver Installation
 
-| Property | Type | Value (hex) |
-| --- | --- | --- |
-| `framebuffer-patch-enable` | Data | `01000000` |
-| `framebuffer-stolenmem` | Data | `0000C003` |
+Download and install **`WhateverXe-Graphics-0.4.4.pkg`** from the [WhateverXe-Graphics Releases](https://github.com/b00t0x/WhateverXe-Graphics/releases/tag/v0.4.4). This package installs the required Metal, OpenGL, and Video Acceleration bundles into `/Library/Extensions` and `/Library/GPUBundles`.
 
-These settings are unnecessary at 96MB and do not increase firmware-allocated memory.
+---
 
-### Other settings
+## Critical Power Management Requirement
 
-- Add `SSDT-PNLF` for internal-display brightness control.
-- GPU selection is automatic; a `device-id` override is normally unnecessary.
-- Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U select tiling automatically. Do not use `-yTileDisable`; `AAPL,GfxYTile` is unnecessary.
+Alder Lake-P Gen12 graphics have a known hardware issue where the blitter ring hangs and triggers a GPU reset if the internal panel is permitted to blank due to idle timeouts.
 
-## Tested features and known issues
+Immediately after booting, open Terminal and disable display idle sleep:
 
-The common regression checks cover Metal, OpenGL, OpenCL, hardware H.264 encode/decode and HEVC decode. The table summarizes OS coverage and configuration-specific display features.
+```bash
+sudo pmset -a displaysleep 0
+```
 
-| Configuration | Verified coverage |
-| --- | --- |
-| Tiger Lake mini PCs | Big Sur–Tahoe: 80 EU, two 1080p60 displays, display off/on, Safari video and Widevine |
-| Tiger Lake laptops | Big Sur–Tahoe: 48 EU, internal eDP and brightness, HDMI/USB-C, up to three displays and display off/on |
-| Alder Lake-N mini PCs | Big Sur–Tahoe: 16/24 EU, two 1080p60 HDMI displays and display off/on |
-| Alder Lake-N / Twin Lake laptops | MicroPC 2 and MiniBook X N100 on Big Sur/Tahoe: MIPI DSI, brightness, rotation, display off/on and HDMI/USB-C coexistence. MicroPC 2: HiDPI and up to three displays; MiniBook X N100: optional 60 Hz |
-| Raptor Lake-U laptop | MiniBook X U300 on Big Sur/Tahoe: internal MIPI DSI, brightness, rotation, HiDPI and up to two USB-C displays. Internal panel: 50 Hz; optional 60 Hz also tested on Big Sur |
-| Alder Lake-H | Big Sur–Tahoe: 96 EU, three displays using HDMI and a DP-to-HDMI adapter. Single-channel `4626` graphics acceleration checked on Big Sur |
-| Alder Lake-S | Big Sur–Tahoe: UHD 770, HDMI/DP/USB-C and up to three displays; Safari video, with Widevine checked on Big Sur/Tahoe |
+System sleep (closing the lid or selecting Sleep from the Apple menu) will function, but automated screen blanking while awake must remain disabled to prevent GPU hangs.
 
-MIPI DSI support is **experimental**, limited to the tested GPD MicroPC 2 and CHUWI MiniBook X N100/U300 panels. Do not expect it to work on other devices.
+---
 
-System sleep/wake support is **experimental**. Tested configurations are MiniBook X N100/U300 (MIPI DSI) on Big Sur and Tahoe with model-specific ACPI settings, using the internal display alone or up to two external displays. Other models, OS versions and prolonged DarkWake cycles remain unverified.
+## Building from Source
 
-### Known issues and limits
+To build `WhateverXe.kext` locally:
 
-- DisplayPort reconnection can cause black screens or freezes. Tiger Lake USB-C reconnection is also unreliable; Alder Lake-S DP output/reconnection can be slow.
-- Some image-conversion operations can crash applications.
-- Safari video may occasionally drop frames. FairPlay-protected playback is unsupported.
-- Up to three displays are supported. Resolutions beyond the tested configurations remain unverified.
-- Some connector layouts and backlight methods, MST and Thunderbolt-managed outputs are unsupported.
+```bash
+git clone https://github.com/NebbaGiveUp/WhateverXe-AlderLake.git
+cd WhateverXe-AlderLake
 
-### Roadmap
+# Fetch MacKernelSDK
+git clone https://github.com/acidanthera/MacKernelSDK.git MacKernelSDK
+git -C MacKernelSDK checkout 05094e5e88cec7caedbfb35e8449ed0db94bf95b
 
-- Complete DisplayPort, USB-C and internal-display support on Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U.
-- Improve display reconnection reliability and extend system sleep/wake coverage.
+# Fetch Lilu headers
+git clone --branch 1.7.2 --depth 1 https://github.com/acidanthera/Lilu.git build/dependencies/Lilu
+mkdir -p Lilu.kext/Contents/Resources
+ln -s "$PWD/build/dependencies/Lilu/Lilu/Headers" Lilu.kext/Contents/Resources/Headers
+ln -s "$PWD/build/dependencies/Lilu/Lilu/Library" Lilu.kext/Contents/Resources/Library
 
-## Build and test
-
-Requires macOS, Xcode command-line tools, Python 3.9+, MacKernelSDK and Lilu 1.7.2 development headers/library. Place `MacKernelSDK/` and `Lilu.kext/` in the repository root, or pass `--sdk` and `--lilu`.
-
-```sh
-python3 tools/build.py --release
+# Run tests and build Release
 python3 tools/test.py
+python3 tools/build.py --release --output build/RELEASE
 ```
 
-Output is under `build/`. AppleIntelTGLCompat is built here and distributed through Graphics. Optional exact-donor tests accept `--donor` and `--accelerator` paths.
+The compiled `WhateverXe.kext` will be placed in `build/RELEASE/WhateverXe.kext`.
 
-## License and credits
+---
 
-WhateverXe retains WhateverGreen's copyright notices and BSD-3-Clause license.
-See [LICENSE.txt](LICENSE.txt). Lilu and MacKernelSDK are separate dependencies.
+## Prebuilt Binaries
 
-Thanks to [JulioNectar/XPS13Plus](https://github.com/JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe) for sharing its Xe graphics work. Its compiler adapter and LLVM bridge informed the OS-native AIR conversion used in WhateverXe Graphics.
+Precompiled RELEASE binaries matching this repository can be downloaded from the [Releases](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) tab.
 
-Internal-panel work also draws on [WhateverXe-RaptorLakeP](https://github.com/samranahmad09/WhateverXe-RaptorLakeP), [X1Carbon-G11](https://github.com/dssoftx/Hackintosh-X1Carbon-G11-IrisXe-Tahoe), XPS13Plus and the [Linux i915 display sources](https://github.com/torvalds/linux/tree/v6.12/drivers/gpu/drm/i915/display) for hardware behavior and implementation comparisons.
+---
 
-The optional MiniBook X 60 Hz panel timing also draws on the [minibookx-ctl display guide](https://github.com/ishad0w/minibookx-ctl/blob/main/docs/guide/display.md).
+## License
+
+This project is licensed under the same terms as upstream WhateverXe (Thou Shalt Not Profit License 1.0 / Apple Public Source License). See `LICENSE.txt` for details.

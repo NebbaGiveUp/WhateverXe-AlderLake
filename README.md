@@ -77,6 +77,8 @@ Verified on the following configuration:
 - **Full Metal 2 Hardware Acceleration:** Powered by `AppleIntelTGLGraphicsMTLDriver`, providing native CoreAnimation desktop compositing, transparent menu bars, fluid dock animations, and responsive Launchpad navigation.
 - **Dynamic VRAM Management:** Accurately reports and allocates 1536 MB of dynamic video memory to system processes.
 - **Internal Display Timing & Backlight:** Native 1920x1080 60Hz panel timing with working backlight level adjustments via keyboard shortcuts and Control Center.
+- **Display Idle Sleep and Wake:** Screen blanking due to inactivity and subsequent waking via keyboard or trackpad input operates normally without freezing or blitter ring hangs, confirmed stable on the Dell Latitude 7430.
+- **System Sleep and Wake:** Full ACPI sleep (closing the lid or selecting Sleep from the Apple menu) and waking cycle reliably.
 - **Hardware-Accelerated Video Playback:**
   - H.264 / AVC 8-bit decode and encode up to 4K resolution.
   - HEVC / H.265 8-bit and 10-bit (Main and Main 10 profiles) hardware decode.
@@ -89,9 +91,6 @@ Verified on the following configuration:
 - **Safari Video Playback (YouTube and Streaming Media):**  
   Safari fails to play YouTube videos and equivalent web video streams, returning a playback error. This occurs because macOS Tahoe's WebKit media pipeline relies on updated FairPlay and AVFoundation decoder pathways that do not interface correctly with the unreleased Tiger Lake GVA driver stack.  
   *Solution:* Use an alternative browser such as Google Chrome, Brave, Microsoft Edge, or Mozilla Firefox. Web video playback in these browsers operates normally with full hardware decoding.
-- **Display Idle Blanking (Blitter Ring Hang):**  
-  Allowing the internal panel to turn off or blank due to an idle timer triggers an Intel Gen12 hardware blitter ring hang, resulting in a GPU reset and system freeze.  
-  *Solution:* Disable display idle sleep via terminal (`sudo pmset -a displaysleep 0`). System sleep (closing the lid or selecting Sleep from the Apple menu) remains functional and does not suffer from this issue.
 
 ---
 
@@ -158,17 +157,15 @@ Download and install **`WhateverXe-Graphics-0.4.4.pkg`** from the [WhateverXe-Gr
 
 ---
 
-## Critical Power Management Requirement
+## Power Management Notes
 
-Alder Lake-P Gen12 graphics have a known hardware issue where the blitter ring hangs and triggers a GPU reset if the internal panel is permitted to blank due to idle timeouts.
+Thanks to the Display Engine master parking and interrupt synchronization commits integrated in this build, standard display sleep timeouts work reliably out of the box on the Dell Latitude 7430. You do not need to alter power management settings for daily use.
 
-Immediately after booting, open Terminal and disable display idle sleep:
+If you are adapting this build for another laptop model and encounter blitter ring hangs during screen blanking, you can disable display idle sleep in Terminal as a troubleshooting measure:
 
 ```bash
 sudo pmset -a displaysleep 0
 ```
-
-System sleep (closing the lid or selecting Sleep from the Apple menu) will function, but automated screen blanking while awake must remain disabled to prevent GPU hangs.
 
 ---
 

@@ -85,8 +85,7 @@ Verified on the following configuration:
   - **HEVC / H.265 (8-bit and 10-bit Main/Main 10):** Full GPU hardware decode via `IOGVAHEVCDecode`, playing smoothly up to 4K resolution in QuickTime, TV app, and media players.
   - **H.264 / AVC:** Handled via CPU software decoding using the 12-core / 16-thread i7-1270P when configured with `-wexgvadrop=IOGVAScaler,IOGVABGRAEnc,IOGVAHEVCEncodeCapabilities,IOGVACodec`. This avoids the donor VA driver's hardware Multi-Format Codec (`VCS0`) ring fault (`EIR = 0x4`) and eliminates the GPU reset freeze during Telegram animated GIF/sticker playback.
   - **Fullscreen Media & Photo Viewer:** Instant opening without the 9.2-second `VPHAL` unsupported resolution timeout that previously froze messaging apps.
-  - **Full Web Video Streaming:** Fully functional in Chromium-based browsers (Google Chrome, Brave, Microsoft Edge), Mozilla Firefox, and Safari up to 1080p60.
-
+  - **Full Web Video Streaming:** Fully functional in Chromium-based browsers (Google Chrome, Brave, Microsoft Edge), Mozilla Firefox up to 4k
 ### Known Limitations
 
 - **Safari 4K VP9/AV1 Streaming:**  
@@ -103,7 +102,7 @@ Dell Latitude 7430 users can directly use the preconfigured [Dell Latitude 7430 
 For other laptops, ensure the following kexts are placed in `EFI/OC/Kexts` and added in `config.plist` under `Kernel -> Add` (Just use OC snapshot if you're using propertree gui) in this exact order:
 
 1. `Lilu.kext` (v1.7.2 or newer)
-2. [`WhateverXe.kext`](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases/download/v0.8.2-adl/WhateverXe-0.8.2-AlderLake-RELEASE.zip) (download prebuilt binary [`WhateverXe-0.8.2-AlderLake-RELEASE.zip`](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases/download/v0.8.2-adl/WhateverXe-0.8.2-AlderLake-RELEASE.zip) from [Releases](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) or compile from source)
+2. [`WhateverXe.kext`](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases/download/v0.8.2-adl/WhateverXe-0.8.2-AlderLake-RELEASE.zip) (download prebuilt binary from [Releases](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) or compile from source)
 3. `AppleIntelTGLCompat.kext` (bundled with WhateverXe-Graphics)
 4. `AMFIPass.kext` (**Must use the AMFIPass 1.4.1 Mod build**; official upstream AMFIPass will fail library validation for the userspace graphics drivers on macOS Tahoe)
 

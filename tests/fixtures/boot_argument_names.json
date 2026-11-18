@@ -145,6 +145,7 @@
   "-wex-noaccel": [],
   "-wex-no-gva": [],
   "-wex-no-gva-scaler": [],
+  "-wexgvadrop": [],
   "-wex-display-trace": [],
   "-wex-adlp-readout": [],
   "-wex-adlp-load-only": [],

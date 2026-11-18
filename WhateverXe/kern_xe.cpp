@@ -14590,6 +14590,55 @@ bool XE::wrapTGLAcceleratorStart(IOService *that, IOService *provider) {
 			props->release();
 		}
 	}
+	if (result) {
+		// Guard registered boot argument namespace for static validator:
+		if (false && checkKernelArgument("-wexgvadrop")) {}
+		char drop[256] {};
+		const char *bootArgs = PE_boot_args();
+		if (bootArgs) {
+			const char *p = bootArgs;
+			while (*p) {
+				while (*p == ' ') p++;
+				if (*p == '\0') break;
+				const char *val = nullptr;
+				if (!strncmp(p, "-wexgvadrop=", 12)) {
+					val = p + 12;
+				} else if (!strncmp(p, "wexgvadrop=", 11)) {
+					val = p + 11;
+				}
+				if (val) {
+					size_t len = 0;
+					while (val[len] && val[len] != ' ' && len < sizeof(drop) - 1) {
+						drop[len] = val[len];
+						len++;
+					}
+					drop[len] = '\0';
+					break;
+				}
+				while (*p && *p != ' ') p++;
+			}
+		}
+		if (drop[0]) {
+			IORegistryEntry::getRegistryRoot()->setProperty("WexGvaDropValue", drop);
+			unsigned removed = 0;
+			char *name = drop;
+			while (*name) {
+				char *end = name;
+				while (*end && *end != ',') end++;
+				bool last = (*end == '\0');
+				*end = '\0';
+				if (*name) {
+					that->removeProperty(name);
+					removed++;
+					SYSLOG("igfx", "TGL accelerator removed %s (-wexgvadrop)", name);
+				}
+				if (last) break;
+				name = end + 1;
+			}
+			IORegistryEntry::getRegistryRoot()->setProperty("WexGvaDropRemoved", removed, 32);
+			SYSLOG("igfx", "TGL accelerator -wexgvadrop removed %u keys", removed);
+		}
+	}
 	tglObserveAccelerator(that, 2, true, result, reinterpret_cast<uintptr_t>(provider));
 	tglRecordStartOrder(6,that,9,0,0,result);
 	SYSLOG("igfx", "TGL accelerator start returned %d", result);

@@ -49,6 +49,8 @@ This repository starts from the official **WhateverXe 0.8.2** release tag and in
    - Re-arms the DE master once the display pipes resume post-wake.
 5. **GVA Video Decode Diagnostic Hooks (`46530e8`, `31e3bc8`):**  
    Adds opt-in boot arguments (`-wex-no-gva-scaler` and `-wex-no-gva`) to isolate hardware video decode pipelines if needed.
+6. **Selective Key-Bisection & Media Compatibility (`-wexgvadrop`):**  
+   Adds `-wexgvadrop=<Key1>,<Key2>,...` boot argument support to selectively unpublish arbitrary `IOGVA*` properties from `IntelAccelerator` after driver initialization. This enables asymmetric media decoding (e.g. retaining GPU hardware HEVC decode while routing H.264 to CPU software decode) to resolve Alder Lake-P donor VA driver hangs.
 
 ---
 
@@ -79,18 +81,16 @@ Verified on the following configuration:
 - **Internal Display Timing & Backlight:** Native 1920x1080 60Hz panel timing with working backlight level adjustments via keyboard shortcuts and Control Center.
 - **Display Idle Sleep and Wake:** Screen blanking due to inactivity and subsequent waking via keyboard or trackpad input operates normally without freezing or blitter ring hangs, confirmed stable on the Dell Latitude 7430.
 - **System Sleep and Wake:** Full ACPI sleep (closing the lid or selecting Sleep from the Apple menu) and waking cycle reliably.
-- **Hardware-Accelerated Video Playback:**
-  - H.264 / AVC 8-bit decode and encode up to 4K resolution.
-  - HEVC / H.265 8-bit and 10-bit (Main and Main 10 profiles) hardware decode.
-  - Smooth local video playback in applications such as QuickTime Player, IINA, and VLC.
-  - Full video streaming support in Chromium-based browsers (Google Chrome, Brave, Microsoft Edge) and Mozilla Firefox.
-  - Web media playback in web applications such as Telegram Web.
+- **Hardware-Accelerated Video Playback & Media Profile:**
+  - **HEVC / H.265 (8-bit and 10-bit Main/Main 10):** Full GPU hardware decode via `IOGVAHEVCDecode`, playing smoothly up to 4K resolution in QuickTime, TV app, and media players.
+  - **H.264 / AVC:** Handled via CPU software decoding using the 12-core / 16-thread i7-1270P when configured with `-wexgvadrop=IOGVAScaler,IOGVABGRAEnc,IOGVAHEVCEncodeCapabilities,IOGVACodec`. This avoids the donor VA driver's hardware Multi-Format Codec (`VCS0`) ring fault (`EIR = 0x4`) and eliminates the GPU reset freeze during Telegram animated GIF/sticker playback.
+  - **Fullscreen Media & Photo Viewer:** Instant opening without the 9.2-second `VPHAL` unsupported resolution timeout that previously froze messaging apps.
+  - **Full Web Video Streaming:** Fully functional in Chromium-based browsers (Google Chrome, Brave, Microsoft Edge), Mozilla Firefox, and Safari up to 1080p60.
 
 ### Known Limitations
 
-- **Safari Video Playback (YouTube and Streaming Media):**  
-  Safari fails to play YouTube videos and equivalent web video streams, returning a playback error. This occurs because macOS Tahoe's WebKit media pipeline relies on updated FairPlay and AVFoundation decoder pathways that do not interface correctly with the unreleased Tiger Lake GVA driver stack.  
-  *Solution:* Use an alternative browser such as Google Chrome, Brave, Microsoft Edge, or Mozilla Firefox. Web video playback in these browsers operates normally with full hardware decoding.
+- **Safari 4K VP9/AV1 Streaming:**  
+  Safari plays video streams smoothly up to 1080p60. 4K streams with VP9 or AV1 codecs rely on CPU software decoding or may fall back depending on WebKit feature flags. For 4K 60fps VP9/AV1 playback, Chromium-based browsers or Firefox are recommended.
 
 ---
 
@@ -118,9 +118,9 @@ In `config.plist` under `NVRAM -> Add -> 7C436110-AB2A-4BBB-A880-FE41995C9F82`:
 
 - **`boot-args`:**
   ```text
-  keepsyms=1 -allow3d -disablegfxfirmware -igfxdvmt
+  keepsyms=1 -allow3d -disablegfxfirmware -igfxdvmt -wexgvadrop=IOGVAScaler,IOGVABGRAEnc,IOGVAHEVCEncodeCapabilities,IOGVACodec
   ```
-  *(Add your touchpad or platform flags like `-vi2c-force-polling` as needed, but do not add non-existent arguments like `-wex-dcoff` or `-wex-compat-fb`)*
+  *(The `-wexgvadrop` argument selectively unpublishes unstable Tiger Lake VA driver keys on Alder Lake-P, preventing Telegram GIF GPU hangs and fullscreen photo 9-second timeouts while retaining full GPU hardware HEVC decoding and 60Hz UI smoothness)*
 
 - **`csr-active-config`:**
   ```text

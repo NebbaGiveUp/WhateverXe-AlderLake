@@ -51,6 +51,8 @@ This repository starts from the official **WhateverXe 0.8.2** release tag and in
    Adds opt-in boot arguments (`-wex-no-gva-scaler` and `-wex-no-gva`) to isolate hardware video decode pipelines if needed.
 6. **Selective Key-Bisection & Media Compatibility (`-wexgvadrop`):**  
    Adds `-wexgvadrop=<Key1>,<Key2>,...` boot argument support to selectively unpublish arbitrary `IOGVA*` properties from `IntelAccelerator` after driver initialization. This enables asymmetric media decoding (e.g. retaining GPU hardware HEVC decode while routing H.264 to CPU software decode) to resolve Alder Lake-P donor VA driver hangs.
+7. **GPU Hang Recovery & RCS State Restoration (`-wex-reset-restore` & `-wex-no-multicontext`):**  
+   Backported from `retropineaple/WhateverXe`. Intercepts GPU engine resets (`GDRST`), wakes forcewake, saves healthy Render Command Streamer (RCS) registers (`RING_MODE` execlists, status page, chicken registers, user whitelist, and MOCS/L3 cache tables), and restores them immediately post-reset before work replay. Sweeps dropped command stamps after 2 seconds and breaks timeout deadlocks in `eventTimeout`, preventing the laptop from freezing and recovering full Metal acceleration within seconds.
 
 ---
 
@@ -86,6 +88,7 @@ Verified on the following configuration:
   - **H.264 / AVC:** Handled via CPU software decoding using the 12-core / 16-thread i7-1270P when configured with `-wexgvadrop=IOGVAScaler,IOGVABGRAEnc,IOGVAHEVCEncodeCapabilities,IOGVACodec`. This avoids the donor VA driver's hardware Multi-Format Codec (`VCS0`) ring fault (`EIR = 0x4`) and eliminates the GPU reset freeze during Telegram animated GIF/sticker playback.
   - **Fullscreen Media & Photo Viewer:** Instant opening without the 9.2-second `VPHAL` unsupported resolution timeout that previously froze messaging apps.
   - **Full Web Video Streaming:** Fully functional in Chromium-based browsers (Google Chrome, Brave, Microsoft Edge), Mozilla Firefox up to 4k
+- **Automatic GPU Hang Recovery:** If an unsupported Metal shader, web video, or 3D workload faults the GPU, WhateverXe catches the hardware reset, restores RCS execlist and cache state, and resumes full GPU operation within seconds without requiring a restart.
 ### Known Limitations
 
 - **Safari 4K VP9/AV1 Streaming:**  
@@ -117,9 +120,11 @@ In `config.plist` under `NVRAM -> Add -> 7C436110-AB2A-4BBB-A880-FE41995C9F82`:
 
 - **`boot-args`:**
   ```text
-  keepsyms=1 -allow3d -disablegfxfirmware -igfxdvmt -wexgvadrop=IOGVAScaler,IOGVABGRAEnc,IOGVAHEVCEncodeCapabilities,IOGVACodec
+  keepsyms=1 -allow3d -disablegfxfirmware -igfxdvmt -wexgvadrop=IOGVAScaler,IOGVABGRAEnc,IOGVAHEVCEncodeCapabilities,IOGVACodec -wex-reset-restore -wex-no-multicontext
   ```
-  *(The `-wexgvadrop` argument selectively unpublishes unstable Tiger Lake VA driver keys on Alder Lake-P, preventing Telegram GIF GPU hangs and fullscreen photo 9-second timeouts while retaining full GPU hardware HEVC decoding and 60Hz UI smoothness)*
+  - `-wexgvadrop=...`: Selectively unpublishes unstable Tiger Lake VA driver keys on Alder Lake-P, preventing Telegram GIF GPU hangs and fullscreen photo 9-second timeouts while retaining full GPU hardware HEVC decoding and 60Hz UI smoothness.
+  - `-wex-reset-restore`: Enables hardware GPU hang recovery on Alder Lake. Wakes forcewake and saves healthy Render Command Streamer (RCS) registers (`RING_MODE` execlist enable, status page, chicken registers, `FORCE_TO_NONPRIV` user whitelist, and MOCS/L3 cache tables) prior to a hardware reset and restores them immediately after `GDRST`. Also sweeps lost progress stamps after 2 seconds and completes stalled waiters in `eventTimeout` to prevent `WindowServer` lockups.
+  - `-wex-no-multicontext`: Clears `EnableMultiContext`, directing compute tasks through the primary render engine instead of the donor's secondary compute ring that deadlocks on Alder Lake.
 
 - **`csr-active-config`:**
   ```text

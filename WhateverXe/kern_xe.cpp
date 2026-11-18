@@ -325,10 +325,15 @@ bool tglRecoverySerialize(void *,void *,OSSerialize *serializer) {
 }
 }
 
+static void gpuResetTrace(uint32_t event,const void *object,uint64_t arg,uint64_t result);
+static void gpuResetDumpAfter(void *channel);
 void XE::wrapTGLRecovery(void *channel) {
 	const auto n=__atomic_fetch_add(&tglRecoveryCalls,1,__ATOMIC_RELAXED);
 	uint64_t before {};clock_get_uptime(&before);
+	gpuResetTrace(1,channel,n,0);
 	const auto result=TGLRecovery::resetAndResume(channel);
+	gpuResetTrace(2,channel,n,result.resetOK|(uint64_t(result.failuresAfter)<<8));
+	gpuResetDumpAfter(channel);
 	uint64_t after {};clock_get_uptime(&after);
 	if (n<arrsize(tglRecoveryRecords)) {
 		auto q=tglRecoveryRecords[n];q[0]=123;q[1]=n+1;q[2]=before;q[3]=after;
@@ -11498,6 +11503,391 @@ bool XE::processAlderLakeNTaskBoundary(KernelPatcher &patcher, size_t index, mac
 	return ready;
 }
 
+// -wex-reset-trace: record the donor's GPU hang recovery. Each entry is
+// {mach time, event, result, object, arg, 16 registers}; events are enter/exit
+// pairs of the channel restart, engine reset, scheduler reset/resume and
+// command-streamer reset. The ring is memory-only and serialized on read, so
+// the recovery path never allocates.
+struct GPUResetTraceEntry {uint64_t time;uint32_t event,result;uint64_t object,arg;uint32_t regs[16];};
+static GPUResetTraceEntry gpuResetTraceRing[96];
+static volatile uint32_t gpuResetTraceCount;
+static volatile uint8_t *gpuResetMMIO;
+// GDRST, 4A08, RCS tail/head/start/ctl, IPEHR, INSTDONE, ACTHD, MI_MODE,
+// RESET_CTL, RING_MODE, EXECLIST_STATUS, CSB pointers, EXECLIST_CONTROL,
+// render forcewake ack.
+static const uint32_t gpuResetTraceRegs[16] {0x941C,0x4A08,0x2030,0x2034,0x2038,0x203C,0x2068,0x206C,
+ 0x2074,0x209C,0x20D0,0x229C,0x2234,0x23A0,0x2550,0x0D84};
+static mach_vm_address_t gpuResetOrgEngine,gpuResetOrgScheduler,gpuResetOrgResume;
+static bool gpuResetTraceOn;
+static void gpuResetTrace(uint32_t event,const void *object,uint64_t arg,uint64_t result) {
+ if(!__atomic_load_n(&gpuResetTraceOn,__ATOMIC_ACQUIRE))return;
+ // IGAccelFIFOChannel +0x18 is the accelerator, whose MMIO base is at +0x1240.
+ if(event==1 && object)if(auto owner=*reinterpret_cast<uint8_t *const *>(static_cast<const uint8_t *>(object)+0x18))
+  __atomic_store_n(&gpuResetMMIO,*reinterpret_cast<uint8_t **>(owner+0x1240),__ATOMIC_RELEASE);
+ const auto n=__sync_fetch_and_add(&gpuResetTraceCount,1);
+ auto &e=gpuResetTraceRing[n%arrsize(gpuResetTraceRing)];
+ e.time=mach_absolute_time();e.event=event;e.result=uint32_t(result);
+ e.object=reinterpret_cast<uint64_t>(object);e.arg=arg;
+ auto mmio=__atomic_load_n(&gpuResetMMIO,__ATOMIC_ACQUIRE);
+ for(unsigned i=0;i<arrsize(gpuResetTraceRegs);++i)
+  e.regs[i]=mmio?*reinterpret_cast<volatile uint32_t *>(mmio+gpuResetTraceRegs[i]):0;
+ // The unified log survives the forced restart that usually follows a failed
+ // recovery; the registry copy does not.
+ const auto &v=e.regs;
+ IOLog("WEXReset %u ev=%u res=%x obj=%llx arg=%llx gdrst=%x 4a08=%x tail=%x head=%x start=%x ctl=%x ipehr=%x "
+  "instdone=%x acthd=%x mimode=%x resetctl=%x mode=%x els=%x csb=%x elc=%x fwack=%x\n",n,event,e.result,e.object,arg,
+  v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],v[14],v[15]);
+}
+static bool gpuResetTraceSerialize(void *,void *,OSSerialize *serializer) {
+ const auto n=__atomic_load_n(&gpuResetTraceCount,__ATOMIC_ACQUIRE);
+ const auto used=n<arrsize(gpuResetTraceRing)?n:uint32_t(arrsize(gpuResetTraceRing));
+ auto out=OSData::withCapacity(sizeof(uint32_t)+used*sizeof(GPUResetTraceEntry));if(!out)return false;
+ out->appendBytes(&n,sizeof(n));
+ // Oldest first, so the decoder reads events in order after a wrap.
+ for(uint32_t i=n-used;i<n;++i)out->appendBytes(&gpuResetTraceRing[i%arrsize(gpuResetTraceRing)],sizeof(GPUResetTraceEntry));
+ const bool result=out->serialize(serializer);out->release();return result;
+}
+// -wex-reset-restore: on this GPU the hung work sits on the donor's second
+// ring (0x1A000 block), whose reset uses the render GDRST domain (mask 2) but
+// whose restore list only names its own 0x1A000 registers. The render
+// engine's mode, status-page and chicken registers are therefore cleared and
+// never restored, so execlists stay off and every replay hangs again. Just
+// before a render-domain reset, wake the render domain and save those
+// registers (only from a healthy engine, execlists on); after the GDRST, with
+// the donor's forcewake still held, write them back before work is replayed.
+// Masked registers are rewritten with all enable bits; the rest raw.
+struct GPUResetRCSRegister {uint32_t reg;bool masked;};
+static const GPUResetRCSRegister gpuResetRCSRegisters[] {{0x229C,true},{0x2080,false},{0x209C,true},{0x20C0,true},
+ {0x2090,true},{0x7000,true},{0x7004,true},{0x20E0,true},{0x20E4,true},{0x20EC,true},{0x2580,true},
+ {0x7010,true},{0xE194,true},{0x20A0,false},{0x4090,false},{0x9430,false},{0x0D08,false},{0xB004,false},
+ // RC_PWRCTX_MAX, EMR and the user-mode register whitelist (FORCE_TO_NONPRIV
+ // 0..11): without it the donor's Metal/VA drivers lose their LRI targets.
+ {0x2054,false},{0x20B4,false},{0x24D0,false},{0x24D4,false},{0x24D8,false},{0x24DC,false},{0x24E0,false},
+ {0x24E4,false},{0x24E8,false},{0x24EC,false},{0x24F0,false},{0x24F4,false},{0x24F8,false},{0x24FC,false}};
+static bool gpuResetRestoreOn,gpuResetRCSValid;
+// The render-domain reset also clears the cache-control tables (global MOCS
+// 0x4000..0x40FC, L3 cache control 0xB020..0xB09C). Without them every GPU
+// access misses the L3 cache and work runs tens of times slower. Saved with
+// the render registers; after the reset, entries that changed are rewritten.
+struct GPUResetTable {uint32_t base,count;};
+static const GPUResetTable gpuResetTables[] {{0x4000,64},{0xB020,32}};
+static uint32_t gpuResetTableSaved[64+32];
+// Stamps whose work was lost in the reset never return, and IOAccel's
+// progress check then signals a restart for them every few seconds with no
+// channel to restart (the GPU work loop stalls each time). Two seconds after a
+// recovery, complete any stamp slot that is still behind its last issued value
+// and has not moved since: {returned +0, issued +8} in 64-byte slots at the
+// ring's +0x30, 64 slots. This fails the lost work instead of waiting forever.
+static uint8_t *volatile gpuResetStampBase;
+static uint32_t gpuResetStampSeen[64];
+static thread_call_t gpuResetStampCall;
+static volatile uint32_t gpuResetStampForced;
+static void gpuResetTrace(uint32_t event,const void *object,uint64_t arg,uint64_t result);
+static void gpuResetStampSweep(thread_call_param_t,thread_call_param_t) {
+ auto base=__atomic_load_n(&gpuResetStampBase,__ATOMIC_ACQUIRE);
+ if(!base)return;
+ uint64_t mask=0;uint32_t forced=0;
+ for(unsigned i=0;i<arrsize(gpuResetStampSeen);++i) {
+  auto slot=reinterpret_cast<volatile uint32_t *>(base+i*64);
+  const uint32_t done=slot[0],issued=slot[2];
+  if(int32_t(issued-done)>0 && done==gpuResetStampSeen[i]) {slot[0]=issued;mask|=1ULL<<i;++forced;}
+ }
+ __atomic_fetch_add(&gpuResetStampForced,forced,__ATOMIC_RELAXED);
+ gpuResetTrace(14,base,mask,forced);
+}
+static void gpuResetStampArm() {
+ auto base=__atomic_load_n(&gpuResetStampBase,__ATOMIC_ACQUIRE);
+ if(!base || !gpuResetStampCall)return;
+ for(unsigned i=0;i<arrsize(gpuResetStampSeen);++i)
+  gpuResetStampSeen[i]=*reinterpret_cast<volatile uint32_t *>(base+i*64);
+ uint64_t deadline;clock_interval_to_deadline(2,kSecondScale,&deadline);
+ thread_call_enter_delayed(gpuResetStampCall,deadline);
+}
+// A waiter that times out on a stamp lost in an earlier reset (for example a
+// command queue being torn down) otherwise waits forever: the engine is idle,
+// not hung, so IOAccel's eventTimeout never restarts anything, and the waiter
+// holds locks WindowServer needs. After a recovery this boot, complete a stamp
+// that is still behind its last issued value and has not moved across three
+// consecutive timeouts on it.
+static volatile uint32_t gpuResetSnapshots,gpuResetRestores;
+static mach_vm_address_t gpuResetOrgEventTimeout;
+static uint32_t gpuResetTimeoutSeen[64];
+static uint8_t gpuResetTimeoutStrikes[64];
+static uint64_t gpuResetEventTimeout(void *machine,int index) {
+ auto base=__atomic_load_n(&gpuResetStampBase,__ATOMIC_ACQUIRE);
+ if(base && index>=0 && index<int(arrsize(gpuResetTimeoutSeen)) &&
+    __atomic_load_n(&gpuResetRestores,__ATOMIC_ACQUIRE)) {
+  auto slot=reinterpret_cast<volatile uint32_t *>(base+index*64);
+  const uint32_t done=slot[0],issued=slot[2];
+  if(int32_t(issued-done)<=0) gpuResetTimeoutStrikes[index]=0;
+  else if(done!=gpuResetTimeoutSeen[index] || !gpuResetTimeoutStrikes[index]) {
+   gpuResetTimeoutSeen[index]=done;gpuResetTimeoutStrikes[index]=1;
+  } else if(++gpuResetTimeoutStrikes[index]>=3) {
+   slot[0]=issued;gpuResetTimeoutStrikes[index]=0;
+   __atomic_fetch_add(&gpuResetStampForced,1,__ATOMIC_RELAXED);
+   gpuResetTrace(15,machine,uint64_t(uint32_t(index))|(uint64_t(done)<<32),issued);
+  }
+ }
+ return FunctionCast(gpuResetEventTimeout,gpuResetOrgEventTimeout)(machine,index);
+}
+// Before/after copies of the donor hang report's register set, for diffing a
+// recovered engine against its pre-reset state (both taken with forcewake).
+static const uint32_t gpuResetDumpRegs[] {
+ // Global MOCS, slice/cache chicken, power gating, L3 cache control (LNCF
+ // MOCS) and half-slice ranges, to see state outside the hang report set.
+ 0x4000,0x4004,0x4008,0x400C,0x4010,0x4014,0x4018,0x401C,0x4020,0x4024,0x4028,0x402C,
+ 0x4034,0x4038,0x403C,0x4048,0x404C,0x4054,0x4058,0x405C,0x4060,0x4064,0x4068,0x406C,
+ 0x4070,0x4074,0x4078,0x407C,0x4080,0x4084,0x4088,0x408C,0x4094,0x4098,0x409C,0x40A0,
+ 0x40A4,0x40A8,0x40AC,0x40B0,0x40B4,0x40B8,0x40BC,0x40C0,0x40C4,0x40C8,0x40CC,0x40D0,
+ 0x40D4,0x40D8,0x40DC,0x40E0,0x40E4,0x40E8,0x40EC,0x40F0,0x40F4,0x40F8,0x40FC,0x700C,
+ 0x7018,0x701C,0x7024,0x7028,0x702C,0x7030,0x7034,0x7038,0x703C,0x7040,0x7044,0x7048,
+ 0x704C,0x7050,0x7054,0x7058,0x705C,0x7060,0x7064,0x7068,0x706C,0x7070,0x7074,0x7078,
+ 0x707C,0x7080,0x7084,0x7088,0x708C,0x7090,0x7094,0x7098,0x709C,0x70A0,0x70A4,0x70A8,
+ 0x70AC,0x70B0,0x70B4,0x70B8,0x70BC,0x70C0,0x70C4,0x70C8,0x70CC,0x70D0,0x70D4,0x70D8,
+ 0x70DC,0x70E0,0x70E4,0x70E8,0x70EC,0x70F0,0x70F4,0x70F8,0x70FC,0x9428,0x942C,0x9430,
+ 0x9434,0x9438,0x943C,0x9440,0x9444,0x9448,0x944C,0x9450,0x9454,0x9458,0x945C,0x9460,
+ 0x9464,0x9468,0x946C,0x9470,0x9474,0x9478,0x947C,0xA200,0xA204,0xA208,0xA20C,0xA210,
+ 0xA214,0xA218,0xA21C,0xA220,0xA224,0xA228,0xA22C,0xA230,0xA234,0xA238,0xA23C,0xA240,
+ 0xA244,0xA248,0xA24C,0xA250,0xA254,0xA258,0xA25C,0xA260,0xA264,0xA268,0xA26C,0xA270,
+ 0xA274,0xA278,0xA27C,0xA280,0xA284,0xA288,0xA28C,0xA290,0xA294,0xA298,0xA29C,0xA2A0,
+ 0xA2A4,0xA2A8,0xA2AC,0xA2B0,0xA2B4,0xA2B8,0xA2BC,0xA2C0,0xA2C4,0xA2C8,0xA2CC,0xA2D0,
+ 0xA2D4,0xA2D8,0xA2DC,0xA2E0,0xA2E4,0xA2E8,0xA2EC,0xA2F0,0xA2F4,0xA2F8,0xA2FC,0xB000,
+ 0xB004,0xB008,0xB00C,0xB010,0xB014,0xB018,0xB01C,0xB020,0xB024,0xB028,0xB02C,0xB030,
+ 0xB034,0xB038,0xB03C,0xB040,0xB044,0xB048,0xB04C,0xB050,0xB054,0xB058,0xB05C,0xB060,
+ 0xB064,0xB068,0xB06C,0xB070,0xB074,0xB078,0xB07C,0xB080,0xB084,0xB088,0xB08C,0xB090,
+ 0xB094,0xB098,0xB09C,0xB0A0,0xB0A4,0xB0A8,0xB0AC,0xB0B0,0xB0B4,0xB0B8,0xB0BC,0xB0C0,
+ 0xB0C4,0xB0C8,0xB0CC,0xB0D0,0xB0D4,0xB0D8,0xB0DC,0xB0E0,0xB0E4,0xB0E8,0xB0EC,0xB0F0,
+ 0xB0F4,0xB0F8,0xB0FC,0xB100,0xB104,0xB108,0xB10C,0xB110,0xB114,0xB118,0xB11C,0xB120,
+ 0xB124,0xB128,0xB12C,0xB130,0xB134,0xB138,0xB13C,0xB140,0xB144,0xB148,0xB14C,0xB150,
+ 0xB154,0xB158,0xB15C,0xB160,0xB164,0xB168,0xB16C,0xB170,0xB174,0xB178,0xB17C,0xB180,
+ 0xB184,0xB188,0xB18C,0xB190,0xB194,0xB198,0xB19C,0xB1A0,0xB1A4,0xB1A8,0xB1AC,0xB1B0,
+ 0xB1B4,0xB1B8,0xB1BC,0xB1C0,0xB1C4,0xB1C8,0xB1CC,0xB1D0,0xB1D4,0xB1D8,0xB1DC,0xB1E0,
+ 0xB1E4,0xB1E8,0xB1EC,0xB1F0,0xB1F4,0xB1F8,0xB1FC,0xE000,0xE004,0xE008,0xE00C,0xE010,
+ 0xE014,0xE018,0xE01C,0xE020,0xE024,0xE028,0xE02C,0xE030,0xE034,0xE038,0xE03C,0xE040,
+ 0xE044,0xE048,0xE04C,0xE050,0xE054,0xE058,0xE05C,0xE060,0xE064,0xE068,0xE06C,0xE070,
+ 0xE074,0xE078,0xE07C,0xE080,0xE084,0xE088,0xE08C,0xE090,0xE094,0xE098,0xE09C,0xE0A0,
+ 0xE0A4,0xE0A8,0xE0AC,0xE0B0,0xE0B4,0xE0B8,0xE0BC,0xE0C0,0xE0C4,0xE0C8,0xE0CC,0xE0D0,
+ 0xE0D4,0xE0D8,0xE0DC,0xE0E0,0xE0E4,0xE0E8,0xE0EC,0xE0F0,0xE0F4,0xE0F8,0xE0FC,0xE100,
+ 0xE104,0xE108,0xE10C,0xE110,0xE114,0xE118,0xE11C,0xE120,0xE124,0xE128,0xE12C,0xE130,
+ 0xE134,0xE138,0xE13C,0xE140,0xE144,0xE148,0xE14C,0xE150,0xE154,0xE158,0xE15C,0xE160,
+ 0xE164,0xE168,0xE16C,0xE170,0xE174,0xE178,0xE17C,0xE180,0xE184,0xE188,0xE18C,0xE190,
+ 0xE194,0xE198,0xE19C,0xE1A0,0xE1A4,0xE1A8,0xE1AC,0xE1B0,0xE1B4,0xE1B8,0xE1BC,0xE1C0,
+ 0xE1C4,0xE1C8,0xE1CC,0xE1D0,0xE1D4,0xE1D8,0xE1DC,0xE1E0,0xE1E4,0xE1E8,0xE1EC,0xE1F0,
+ 0xE1F4,0xE1F8,0xE1FC,0xE400,0xE414,0xE418,0xE41C,0xE420,0xE424,0xE42C,0xE430,0xE434,
+ 0xE438,0xE43C,0xE440,0xE444,0xE448,0xE44C,0xE450,0xE454,0xE458,0xE45C,0xE460,0xE464,
+ 0xE468,0xE46C,0xE470,0xE474,0xE478,0xE47C,0xE480,0xE484,0xE488,0xE48C,0xE490,0xE494,
+ 0xE498,0xE49C,0xE4A0,0xE4A4,0xE4A8,0xE4AC,0xE4B8,0xE4BC,0xE4C0,0xE4C4,0xE4C8,0xE4CC,
+ 0xE4D0,0xE4D4,0xE4D8,0xE4DC,0xE4E0,0xE4E4,0xE4E8,0xE4EC,0xE4F0,0xE4F4,0xE4F8,0xE4FC,
+ 0xE500,0xE504,0xE508,0xE50C,0xE510,0xE514,0xE518,0xE51C,0xE520,0xE524,0xE528,0xE52C,
+ 0xE530,0xE534,0xE538,0xE53C,0xE540,0xE544,0xE548,0xE54C,0xE550,0xE554,0xE558,0xE55C,
+ 0xE560,0xE564,0xE568,0xE56C,0xE570,0xE574,0xE578,0xE57C,0xE580,0xE584,0xE588,0xE58C,
+ 0xE590,0xE594,0xE598,0xE59C,0xE5A0,0xE5A4,0xE5A8,0xE5AC,0xE5B0,0xE5B4,0xE5B8,0xE5BC,
+ 0xE5C0,0xE5C4,0xE5C8,0xE5CC,0xE5D0,0xE5D4,0xE5D8,0xE5DC,0xE5E0,0xE5E4,0xE5E8,0xE5EC,
+ 0xE5F0,0xE5F4,0xE5F8,0xE5FC,
+ // GT frequency (RPS) and RC6 control, PM interrupt enable/mask.
+ 0xA008,0xA00C,0xA010,0xA01C,0xA024,0xA02C,0xA030,0xA068,0xA06C,0xA070,0xA090,0xA094,0xA168,0x19003C,0x190040,
+ 0x2028,0x2030,0x2034,0x2038,0x203C,0x2050,0x2054,0x2068,0x206C,0x2070,0x2074,0x2078,
+ 0x207C,0x2084,0x208C,0x2090,0x2094,0x2098,0x209C,0x20B0,0x20B4,0x20B8,0x20C0,0x20C4,
+ 0x20D0,0x20E0,0x20E4,0x2110,0x2134,0x2140,0x2148,0x2168,0x2178,0x217C,0x2180,0x2190,
+ 0x21A0,0x21A4,0x21B0,0x21D0,0x2200,0x2204,0x2208,0x220C,0x2210,0x222C,0x2234,0x223C,
+ 0x2244,0x2248,0x2250,0x2260,0x2270,0x2274,0x2278,0x227C,0x2280,0x2284,0x2288,0x228C,
+ 0x229C,0x22E0,0x2360,0x2364,0x2368,0x2370,0x2374,0x2378,0x237C,0x2380,0x2384,0x2388,
+ 0x238C,0x2390,0x2394,0x2398,0x239C,0x23A0,0x23A4,0x23A8,0x23AC,0x23B0,0x2400,0x2408,
+ 0x2410,0x2418,0x2420,0x2430,0x2434,0x2438,0x243C,0x2440,0x2450,0x2470,0x24D0,0x24D4,
+ 0x24D8,0x24DC,0x24E0,0x24EC,0x24F0,0x24F4,0x24F8,0x24FC,0x27F0,0x4030,0x4040,0x4044,
+ 0x4050,0x4090,0x4204,0x4510,0x4580,0x4700,0x4704,0x4708,0x470C,0x4780,0x4784,0x4788,
+ 0x478C,0x4790,0x4794,0x4798,0x479C,0x7000,0x7004,0x7008,0x7010,0x7014,0x7020,0x7100,
+ 0x8000,0x9030,0x9034,0x9070,0x91B8,0x91BC,0x91C0,0x91C4,0x91C8,0x91CC,0x9400,0x9404,
+ 0x9408,0x940C,0x9410,0x9414,0x9418,0x941C,0x9420,0x9424,0x9870,0x9874,0x9878,0xCEC4,
+ 0xE404,0xE408,0xE40C,0xE410,0xE428,0xE4B0,0xE4B4,0x12400,0x12404,0x12408,0x1240C,0x12410,
+ 0x12414,0x12418,0x1241C,0x12420,0x12424,0x12428,0x1242C,0x12430,0x12434,0x12438,0x1243C,0x12440,
+ 0x12444,0x14040,0x14050,0x14090,0x140A0,0x14700,0x14704,0x14708,0x1470C,0x14780,0x14784,0x14788,
+ 0x1478C,0x14790,0x14794,0x14798,0x1479C,0x18030,0x18034,0x18038,0x1803C,0x1806C,0x22028,0x22030,
+ 0x22034,0x22038,0x2203C,0x22050,0x22054,0x22064,0x22068,0x2206C,0x22074,0x22078,0x22080,0x22094,
+ 0x22098,0x2209C,0x220A0,0x220B0,0x220B4,0x220B8,0x220C0,0x220D0,0x22134,0x22140,0x22190,0x22198,
+ 0x221D0,0x22200,0x22270,0x22274,0x22278,0x2227C,0x22280,0x22284,0x22288,0x2228C,0x2229C,0x22358,
+ 0x24000,0x24094,0x24700,0x24708,0x24780,0x24784,0x24788,0x2478C,0x72204,0x731AC,0x73204,0x190030,
+ 0x190038,0x190090,0x1900A0,0x1900E8,0x1C0030,0x1C0034,0x1C0038,0x1C003C,0x1C0050,0x1C0054,0x1C0064,0x1C0068,
+ 0x1C006C,0x1C0074,0x1C0078,0x1C0080,0x1C0094,0x1C0098,0x1C009C,0x1C00A0,0x1C00A8,0x1C00B0,0x1C00B4,0x1C00B8,
+ 0x1C00C0,0x1C00D0,0x1C0110,0x1C0114,0x1C0140,0x1C0178,0x1C017C,0x1C0190,0x1C0198,0x1C01D0,0x1C0270,0x1C0274,
+ 0x1C0278,0x1C027C,0x1C0280,0x1C0284,0x1C0288,0x1C028C,0x1C0358};
+static uint32_t gpuResetDump[2][arrsize(gpuResetDumpRegs)];
+static volatile uint32_t gpuResetDumpCount[2];
+static void (*gpuResetForceWake)(void *,bool,unsigned);
+static uint32_t gpuResetRCSSaved[arrsize(gpuResetRCSRegisters)];
+static void gpuResetDumpTake(uint8_t *mmio,unsigned which) {
+ for(unsigned i=0;i<arrsize(gpuResetDumpRegs);++i)
+  gpuResetDump[which][i]=*reinterpret_cast<volatile uint32_t *>(mmio+gpuResetDumpRegs[i]);
+ __atomic_fetch_add(&gpuResetDumpCount[which],1,__ATOMIC_RELEASE);
+}
+// Called after a whole recovery returns: wake, copy, release.
+static void gpuResetDumpAfter(void *channel) {
+ if(!__atomic_load_n(&gpuResetRestoreOn,__ATOMIC_ACQUIRE) || !gpuResetForceWake || !channel)return;
+ auto accel=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(channel)+0x18);
+ auto mmio=accel?*reinterpret_cast<uint8_t **>(accel+0x1240):nullptr;
+ if(!mmio)return;
+ gpuResetForceWake(accel,true,7);gpuResetDumpTake(mmio,1);gpuResetForceWake(accel,false,7);
+ gpuResetStampArm();
+}
+static uint32_t gpuResetSaveRCS(uint8_t *accel) {
+ auto mmio=*reinterpret_cast<uint8_t **>(accel+0x1240);
+ if(!mmio || !gpuResetForceWake)return 0;
+ gpuResetForceWake(accel,true,7);
+ uint32_t values[arrsize(gpuResetRCSRegisters)];
+ for(unsigned i=0;i<arrsize(values);++i)values[i]=*reinterpret_cast<volatile uint32_t *>(mmio+gpuResetRCSRegisters[i].reg);
+ if(values[0]&8)gpuResetDumpTake(mmio,0);
+ uint32_t tables[arrsize(gpuResetTableSaved)];
+ for(unsigned t=0,k=0;t<arrsize(gpuResetTables);++t)
+  for(uint32_t i=0;i<gpuResetTables[t].count;++i,++k)
+   tables[k]=*reinterpret_cast<volatile uint32_t *>(mmio+gpuResetTables[t].base+i*4);
+ gpuResetForceWake(accel,false,7);
+ // RING_MODE bit 3 (legacy ring disabled = execlists) marks a healthy engine;
+ // keep the last healthy copy across back-to-back failed recoveries.
+ if(values[0]!=UINT32_MAX && (values[0]&8) && values[1]) {
+  memcpy(gpuResetRCSSaved,values,sizeof(values));
+  memcpy(gpuResetTableSaved,tables,sizeof(tables));
+  __atomic_store_n(&gpuResetRCSValid,true,__ATOMIC_RELEASE);
+  __atomic_fetch_add(&gpuResetSnapshots,1,__ATOMIC_RELAXED);
+ }
+ return values[0];
+}
+static uint32_t gpuResetRestoreRCS(void *scheduler) {
+ auto accel=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(scheduler)+0x10);
+ if(!accel || !__atomic_load_n(&gpuResetRCSValid,__ATOMIC_ACQUIRE))return 0;
+ auto mmio=*reinterpret_cast<uint8_t **>(accel+0x1240);
+ if(!mmio)return 0;
+ for(unsigned i=0;i<arrsize(gpuResetRCSRegisters);++i) {
+  const auto value=gpuResetRCSSaved[i];
+  *reinterpret_cast<volatile uint32_t *>(mmio+gpuResetRCSRegisters[i].reg)=
+   gpuResetRCSRegisters[i].masked?0xFFFF0000|(value&0xFFFF):value;
+ }
+ uint32_t rewritten=0;
+ for(unsigned t=0,k=0;t<arrsize(gpuResetTables);++t)
+  for(uint32_t i=0;i<gpuResetTables[t].count;++i,++k) {
+   auto reg=reinterpret_cast<volatile uint32_t *>(mmio+gpuResetTables[t].base+i*4);
+   if(*reg!=gpuResetTableSaved[k]) {*reg=gpuResetTableSaved[k];++rewritten;}
+  }
+ __atomic_fetch_add(&gpuResetRestores,1,__ATOMIC_RELAXED);
+ // RING_MODE in the low half, cache-table entries rewritten in the high half.
+ return (*reinterpret_cast<volatile uint32_t *>(mmio+0x229C)&0xFFFF)|(rewritten<<16);
+}
+static bool gpuResetDumpSerialize(void *,void *,OSSerialize *serializer) {
+ uint32_t head[3] {uint32_t(arrsize(gpuResetDumpRegs)),__atomic_load_n(&gpuResetDumpCount[0],__ATOMIC_ACQUIRE),
+  __atomic_load_n(&gpuResetDumpCount[1],__ATOMIC_ACQUIRE)};
+ auto out=OSData::withCapacity(sizeof(head)+sizeof(gpuResetDumpRegs)+sizeof(gpuResetDump));if(!out)return false;
+ out->appendBytes(head,sizeof(head));out->appendBytes(gpuResetDumpRegs,sizeof(gpuResetDumpRegs));
+ out->appendBytes(gpuResetDump,sizeof(gpuResetDump));
+ const bool result=out->serialize(serializer);out->release();return result;
+}
+static bool gpuResetDefaultsSerialize(void *,void *,OSSerialize *serializer) {
+ uint32_t data[3+2*arrsize(gpuResetRCSRegisters)] {};
+ data[0]=__atomic_load_n(&gpuResetRestores,__ATOMIC_ACQUIRE);
+ data[1]=__atomic_load_n(&gpuResetSnapshots,__ATOMIC_ACQUIRE);
+ data[2]=__atomic_load_n(&gpuResetRCSValid,__ATOMIC_ACQUIRE);
+ for(unsigned i=0;i<arrsize(gpuResetRCSRegisters);++i) {
+  data[3+i*2]=gpuResetRCSRegisters[i].reg|(gpuResetRCSRegisters[i].masked?0x80000000U:0);data[4+i*2]=gpuResetRCSSaved[i];
+ }
+ auto out=OSData::withBytes(data,sizeof(data));if(!out)return false;
+ const bool result=out->serialize(serializer);out->release();return result;
+}
+static uint64_t gpuResetEngine(void *ring,void *context) {
+ // IGHardwareRingBuffer: +0x10 accelerator (MMIO at +0x1240), +0x40 engine
+ // index, +0x8B8 per-engine state with reset flags at +0xA4.
+ auto accel=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(ring)+0x10);
+ if(accel)__atomic_store_n(&gpuResetMMIO,*reinterpret_cast<uint8_t **>(accel+0x1240),__ATOMIC_RELEASE);
+ const auto engine=*(static_cast<uint8_t *>(ring)+0x40);
+ if(auto stamps=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(ring)+0x30))
+  __atomic_store_n(&gpuResetStampBase,stamps,__ATOMIC_RELEASE);
+ auto state=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(ring)+0x8B8+engine*8);
+ const uint64_t arg=engine|(uint64_t(state?*reinterpret_cast<uint32_t *>(state+0xA4):UINT32_MAX)<<32);
+ // Event 12: the ring's own reset MMIO base (+0x50) relative to the
+ // accelerator's, its GDRST mask (+0x70) and restore-list length.
+ if(accel) {
+  auto restore=*reinterpret_cast<uint64_t **>(static_cast<uint8_t *>(ring)+0x78);
+  gpuResetTrace(12,ring,*reinterpret_cast<uint64_t *>(static_cast<uint8_t *>(ring)+0x50)-
+   *reinterpret_cast<uint64_t *>(accel+0x1240),
+   *reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(ring)+0x70)|(uint64_t(restore?*restore:0)<<24));
+ }
+ gpuResetTrace(3,context,arg,0);
+ if(accel && __atomic_load_n(&gpuResetRestoreOn,__ATOMIC_ACQUIRE) &&
+    (*reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(ring)+0x70)&2))
+  gpuResetTrace(13,context,arg,gpuResetSaveRCS(accel));
+ auto r=FunctionCast(gpuResetEngine,gpuResetOrgEngine)(ring,context);
+ gpuResetTrace(4,context,arg,r&0xFF);return r;
+}
+static uint64_t gpuResetScheduler(void *scheduler,uint32_t type,void *context) {
+ gpuResetTrace(5,context,type,0);
+ if(__atomic_load_n(&gpuResetRestoreOn,__ATOMIC_ACQUIRE))
+  gpuResetTrace(11,context,type,gpuResetRestoreRCS(scheduler));
+ auto r=FunctionCast(gpuResetScheduler,gpuResetOrgScheduler)(scheduler,type,context);
+ gpuResetTrace(6,context,type,r);return r;
+}
+static uint64_t gpuResetResume(void *scheduler) {
+ gpuResetTrace(7,scheduler,0,0);
+ auto r=FunctionCast(gpuResetResume,gpuResetOrgResume)(scheduler);
+ gpuResetTrace(8,scheduler,0,r);return r;
+}
+// The channel restart and the command-streamer reset already have WhateverXe
+// routes (single-pass recovery, CSB12); their wrappers record events 1/2 and
+// 9/10, so only the donor functions nothing else routes are hooked here.
+static bool gpuResetTraceInstall(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+ static const char *symbols[] {"__ZN20IGHardwareRingBuffer19resetGraphicsEngineEP17IGHardwareContext",
+  "__ZN12IGScheduler515processGPUResetE10IGHwCsTypeP17IGHardwareContext","__ZN12IGScheduler56resumeEv"};
+ static const uintptr_t offsets[] {0x43576,0x380D8,0x3906C};
+ static const uint8_t engine[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x18,0x49};
+ static const uint8_t scheduler[] {0x55,0x48,0x89,0xE5,0x89,0xF0,0x48,0x8B,0xBC,0xC7,0xA0,0x0C,0,0,0x5D,0xE9,0xAA,0x22};
+ static const uint8_t resume[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x53,0x50,0xC6,0x87,0x88,0x0A,0,0,0,0x4C};
+ static const uint8_t *heads[] {engine,scheduler,resume};
+ bool ready=size>0x43600;
+ for(unsigned i=0;i<arrsize(symbols) && ready;++i)
+  ready=patcher.solveSymbol<mach_vm_address_t>(index,symbols[i],address,size)==address+offsets[i] &&
+   !memcmp(reinterpret_cast<void *>(address+offsets[i]),heads[i],sizeof(engine));
+ patcher.clearError();
+ if(ready) {
+  KernelPatcher::RouteRequest routes[] {{symbols[0],gpuResetEngine,gpuResetOrgEngine},
+   {symbols[1],gpuResetScheduler,gpuResetOrgScheduler},{symbols[2],gpuResetResume,gpuResetOrgResume}};
+  ready=patcher.routeMultiple(index,routes,arrsize(routes),address,size);
+  patcher.clearError();
+ }
+ __atomic_store_n(&gpuResetTraceOn,ready,__ATOMIC_RELEASE);
+ if(ready && checkKernelArgument("-wex-reset-restore")) {
+  static const uint8_t wake[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50};
+  auto at=patcher.solveSymbol<mach_vm_address_t>(index,"__ZN16IntelAccelerator13SafeForceWakeEbj",address,size);
+  patcher.clearError();
+  if(at==address+0x28C2A && !memcmp(reinterpret_cast<void *>(at),wake,sizeof(wake)))
+   gpuResetForceWake=reinterpret_cast<void (*)(void *,bool,unsigned)>(at);
+ }
+ const bool restore=ready && gpuResetForceWake;
+ if(restore && !gpuResetStampCall)gpuResetStampCall=thread_call_allocate(gpuResetStampSweep,nullptr);
+ if(restore) {
+  // IGAccelEventMachine::eventTimeout(int): exact donor entry, no other route.
+  static const uint8_t timeout[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x18};
+  const char *symbol="__ZN19IGAccelEventMachine12eventTimeoutEi";
+  bool timeoutReady=patcher.solveSymbol<mach_vm_address_t>(index,symbol,address,size)==address+0x15F22 &&
+   !memcmp(reinterpret_cast<void *>(address+0x15F22),timeout,sizeof(timeout));
+  patcher.clearError();
+  if(timeoutReady) {
+   KernelPatcher::RouteRequest route {symbol,gpuResetEventTimeout,gpuResetOrgEventTimeout};
+   timeoutReady=patcher.routeMultiple(index,&route,1,address,size);patcher.clearError();
+  }
+  IORegistryEntry::getRegistryRoot()->setProperty("WEXGPUResetEventTimeoutReady",timeoutReady);
+ }
+ __atomic_store_n(&gpuResetRestoreOn,restore,__ATOMIC_RELEASE);
+ auto root=IORegistryEntry::getRegistryRoot();
+ root->setProperty("WEXGPUResetTraceReady",ready);
+ root->setProperty("WEXGPUResetRestoreReady",restore);
+ if(ready)if(auto live=OSSerializer::forTarget(nullptr,gpuResetTraceSerialize)) {
+  root->setProperty("WEXGPUResetTrace",live);live->release();
+ }
+ if(restore)if(auto live=OSSerializer::forTarget(nullptr,gpuResetDefaultsSerialize)) {
+  root->setProperty("WEXGPUResetDefaults",live);live->release();
+ }
+ if(restore)if(auto live=OSSerializer::forTarget(nullptr,gpuResetDumpSerialize)) {
+  root->setProperty("WEXGPUResetDump",live);live->release();
+ }
+ return ready;
+}
+
 bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
  if(adlnDetected && tglAcceleratorRequested)dsiBackingHooksReady=processDSIBackingHooks(patcher,index,address,size);
  // Framebuffer-only mode must never enter the donor accelerator probe.
@@ -11517,6 +11907,8 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
  const bool surfaceABIReady=tglInstallSonomaSurfaceABI(patcher,index,address,size,false);
  IORegistryEntry::getRegistryRoot()->setProperty("TGLSonomaSurfaceAcceleratorReady",surfaceABIReady);
  if(adlnDetected && (checkKernelArgument("-wex-adln-kernel-ctx") || adlnNativeRCSProfileRequested))adlnPrepareRCSProfile(patcher,index,address,size);
+ if(checkKernelArgument("-wex-reset-trace") || checkKernelArgument("-wex-reset-restore"))
+  gpuResetTraceInstall(patcher,index,address,size);
    // Serialize only the two direct stores in detectEDRAM. The original
    // forcewake and 1000ms sleep remain outside the shared gate.
    {
@@ -14527,6 +14919,20 @@ bool XE::wrapTGLAcceleratorStart(IOService *that, IOService *provider) {
 			that->setProperty("IOVARendererID", 0x1080080, 32);
 	}
 
+	// -wex-no-multicontext: the donor personality enables its second
+	// (multi-context compute) command streamer. Run compute on the render
+	// engine instead; populateAccelConfig reads this before engine setup.
+	if (checkKernelArgument("-wex-no-multicontext")) {
+		auto dev=OSDynamicCast(OSDictionary,that->getProperty("Development"));
+		auto copy=dev ? OSDictionary::withDictionary(dev) : nullptr;
+		auto zero=OSNumber::withNumber(0ULL,32);
+		const bool set=copy && zero && copy->setObject("EnableMultiContext",zero);
+		if (set) that->setProperty("Development",copy);
+		IORegistryEntry::getRegistryRoot()->setProperty("WEXMultiContextDisabled",set);
+		if (zero) zero->release();
+		if (copy) copy->release();
+	}
+
 	// Big Sur's HEVC decoder requires this registry admission key in addition
 	// to the per-profile capability dictionary. The TGL personality has the
 	// dictionary but omits the key; use the paired ICL host's registration value.
@@ -15477,8 +15883,10 @@ bool XE::wrapTGLCSBInit(void *streamer,void *owner,void *loop,void *scheduler,un
 }
 void XE::wrapTGLCSBWake(void *streamer) { tglCSBInitialize(streamer); }
 void XE::wrapTGLCSBReset(void *streamer) {
+ gpuResetTrace(9,streamer,0,0);
  tglCSBInitialize(streamer);
  FunctionCast(wrapTGLCSBReset,callbackXE->orgTGLCSBReset)(streamer);
+ gpuResetTrace(10,streamer,0,0);
 }
 void XE::wrapTGLCSBProcess(void *streamer,uint32_t flags) {
  TGLCSBIO io(streamer,flags);auto &engine=tglCSBEngines[io.engine];

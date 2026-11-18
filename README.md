@@ -97,7 +97,7 @@ Verified on the following configuration:
 
 ### 1. Required Kexts and Load Order
 
-Dell Latitude 7430 users can directly use the preconfigured [Dell Latitude 7430 OpenCore EFI](https://github.com/NebbaGiveUp/Dell-Latitude-7430-Hackintosh-OC-EFI) repository, which already includes all tested fixes, kexts, and ACPI patches.
+Dell Latitude 7430 users can look at the preconfigured EFI [Dell Latitude 7430 OpenCore EFI](https://github.com/NebbaGiveUp/Dell-Latitude-7430-Hackintosh-OC-EFI) repository, which already includes all tested fixes, kexts, and ACPI patches for this model and will help you to build yours.
 
 For other laptops, ensure the following kexts are placed in `EFI/OC/Kexts` and added in `config.plist` under `Kernel -> Add` (Just use OC snapshot if you're using propertree gui) in this exact order:
 

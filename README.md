@@ -199,7 +199,7 @@ The compiled `WhateverXe.kext` will be placed in `build/RELEASE/WhateverXe.kext`
 
 ## Prebuilt Binaries
 
-Precompiled RELEASE binaries matching this repository can be downloaded from the [Releases](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) tab (or directly via [WhateverXe-0.8.2-AlderLake-RELEASE.zip](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases/download/v0.8.2-adl/WhateverXe-0.8.2-AlderLake-RELEASE.zip)).
+Precompiled RELEASE binaries matching this repository can be downloaded from the [Releases](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) tab.
 
 ---
 

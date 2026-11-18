@@ -103,7 +103,7 @@ Dell Latitude 7430 users can directly use the preconfigured [Dell Latitude 7430 
 For other laptops, ensure the following kexts are placed in `EFI/OC/Kexts` and added in `config.plist` under `Kernel -> Add` (Just use OC snapshot if you're using propertree gui) in this exact order:
 
 1. `Lilu.kext` (v1.7.2 or newer)
-2. [`WhateverXe.kext`](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) (download prebuilt binary from [Releases](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) or compile from source)
+2. [`WhateverXe.kext`](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases/download/v0.8.2-adl/WhateverXe-0.8.2-AlderLake-RELEASE.zip) (download prebuilt binary [`WhateverXe-0.8.2-AlderLake-RELEASE.zip`](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases/download/v0.8.2-adl/WhateverXe-0.8.2-AlderLake-RELEASE.zip) from [Releases](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) or compile from source)
 3. `AppleIntelTGLCompat.kext` (bundled with WhateverXe-Graphics)
 4. `AMFIPass.kext` (**Must use the AMFIPass 1.4.1 Mod build**; official upstream AMFIPass will fail library validation for the userspace graphics drivers on macOS Tahoe)
 
@@ -200,7 +200,7 @@ The compiled `WhateverXe.kext` will be placed in `build/RELEASE/WhateverXe.kext`
 
 ## Prebuilt Binaries
 
-Precompiled RELEASE binaries matching this repository can be downloaded from the [Releases](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) tab.
+Precompiled RELEASE binaries matching this repository can be downloaded from the [Releases](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases) tab (or directly via [WhateverXe-0.8.2-AlderLake-RELEASE.zip](https://github.com/NebbaGiveUp/WhateverXe-AlderLake/releases/download/v0.8.2-adl/WhateverXe-0.8.2-AlderLake-RELEASE.zip)).
 
 ---
 

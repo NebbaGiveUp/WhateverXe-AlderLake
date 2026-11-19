@@ -117,7 +117,7 @@ static TGLSameTail::State tglSameTailState{},tglSameTailFailure{};
 static TGLSubmitHistory::History<> tglSubmitHistory;
 static bool tglSameTailSerialize(void *,void *,OSSerialize *);
 static bool tglGSYNCReady,tglGSYNCObserveReady;
-static constexpr uint32_t tglTahoeDisabledTrials=31; // 1 completion, 2 indirect, 4 same-tail, 8 GSYNC, 16 RPCS
+static uint32_t tglTahoeDisabledTrials=4; // 1 completion, 2 indirect, 4 same-tail, 8 GSYNC, 16 RPCS
 static bool tglSameTailRestoreEnabled;
 // schema, attempts, writes, already disabled, guard failures, readback failures,
 // first before/after, last before/after, first/last ordinal, first complete,
@@ -12520,6 +12520,9 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// notification selection, packet lengths and the preceding CS stall.
 			const bool tahoeTrialScope=!adlnDetected && checkKernelArgument("-disablegfxfirmware") &&
 				(XELP::kernelOS(version)==XELP::OS::Tahoe);
+			uint32_t trialsArg=0;
+			if(lilu_get_boot_args("-wex-trials", &trialsArg, sizeof(trialsArg)))
+				tglTahoeDisabledTrials=trialsArg;
 			const bool completionCacheRequested=tahoeTrialScope && !(tglTahoeDisabledTrials&1);
 			const bool contextCacheRequested=tahoeTrialScope && !(tglTahoeDisabledTrials&2);
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLTahoeDisabledTrials",tglTahoeDisabledTrials,32);
@@ -12534,9 +12537,12 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLSameTailRestoreReady",tglSameTailRestoreEnabled);
 			// The public TGL register definition identifies colored GSYNC at
 			// B0A0[2]. Restrict this repair trial to the physical TGL B0 target,
-			// exact Tahoe kernel/donor and the qualified strong-UC mapping.
+			// Alder Lake-P / Alder Lake-N, exact Tahoe kernel/donor and the qualified strong-UC mapping.
+			const bool isTGLOrADL = (xeProfile.identity==0x9A498086 && xeProfile.revision==1) ||
+				(xeProfile.family==XELP::Family::AlderLakeP) ||
+				(xeProfile.family==XELP::Family::AlderLakeN);
 			const bool gsyncQualified=tglSameTailEnabled && tglMMIOUCReady &&
-				xeProfile.identity==0x9A498086 && xeProfile.revision==1 && !xeProfile.overridden();
+				isTGLOrADL && !xeProfile.overridden();
 			tglGSYNCObserveReady=gsyncQualified;
 			tglGSYNCReady=gsyncQualified && !(tglTahoeDisabledTrials&8);
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLGSYNCDisableReady",tglGSYNCReady);

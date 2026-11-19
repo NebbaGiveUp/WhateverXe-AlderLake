@@ -19,6 +19,7 @@ This repository incorporates the following fixes:
 5. **Selective GVA Unpublishing (`-wexgvadrop`):** Selectively unpublishes unstable Tiger Lake VA driver keys on Alder Lake-P, preventing hardware codec (`VCS0`) ring faults and UI freezes while keeping HEVC GPU decode active.
 6. **Hardware Reset & RCS Recovery (`-wex-reset-restore`):** Intercepts GPU hardware engine resets (`GDRST`), preserves and restores Render Command Streamer (RCS) registers (execlists, status page, chicken bits, whitelist, and MOCS/L3 cache tables), and sweeps dropped event stamps, recovering the GPU within seconds without system lockup.
 7. **Single Context Enforcement (`-wex-no-multicontext`):** Directs compute tasks through the primary render engine to prevent Alder Lake multi-context deadlocks.
+8. RPCS full-slice, GSYNC preemption fix for improving ui smoothness and heavy task performance up to 30%
 
 ---
 
